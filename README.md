@@ -8,7 +8,7 @@ Following the same principle it is possible to store the logs in any other datas
 * Put the built jar (`mvn clean install`) file to Cassandra `/lib` folder.
 * Start Cassandra with the following Java option:
 
-`-Dcassandra.custom_query_handler_class=ccom.ltagliamonte.cassandra.audit.AuditQueryHandler`
+`-Dcassandra.custom_query_handler_class=com.ltagliamonte.cassandra.audit.AuditQueryHandler`
 
 ## Variables
 Using Environment Variables it is possible to customise the following parameters:
