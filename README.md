@@ -4,7 +4,7 @@ Prior to Cassandra 4 there is no auditing feature included to the open-source ve
 This is a proof of concept designed for archiving query logs in Elasticsearch.
 Following the same principle it is possible to store the logs in any other datastore (Cassandra,Mysql,Postgress) (PRs are welcome). 
 
-## Deploy this Audit plugin to Cassansdra
+## Deploy this Audit plugin to Cassandra
 * Put the built jar (`mvn clean install`) file to Cassandra `/lib` folder.
 * Start Cassandra with the following Java option:
 
