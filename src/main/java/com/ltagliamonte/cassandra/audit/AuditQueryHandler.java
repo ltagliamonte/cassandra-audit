@@ -1,8 +1,10 @@
 package com.ltagliamonte.cassandra.audit;
 
+import com.googlecode.concurrentlinkedhashmap.ConcurrentLinkedHashMap;
 import org.apache.cassandra.auth.AuthenticatedUser;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.statements.BatchStatement;
+import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.cql3.statements.ParsedStatement;
 import org.apache.cassandra.exceptions.RequestExecutionException;
 import org.apache.cassandra.exceptions.RequestValidationException;
@@ -28,8 +30,7 @@ import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.Collections;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Decorator around the real query handler that audit all the performed queries.
@@ -38,6 +39,8 @@ public class AuditQueryHandler implements QueryHandler {
 
     private static final QueryHandler realQueryHandler = QueryProcessor.instance;
     private static final Logger LOGGER = LoggerFactory.getLogger(AuditQueryHandler.class);
+    private static ConcurrentLinkedHashMap<MD5Digest, String> preparedResult;
+    private static ConcurrentLinkedHashMap<CQLStatement, MD5Digest> preparedStatement;
     private static String esIndexName = "cassandra_audit";
     private static String esHost = "127.0.0.1";
     private static Integer esPort = 443;
@@ -45,6 +48,13 @@ public class AuditQueryHandler implements QueryHandler {
     private static RestClient restClient;
 
     public AuditQueryHandler() {
+        long MAX_CACHE_PREPARED_MEMORY = Runtime.getRuntime().maxMemory() / 256L;
+        preparedResult = new ConcurrentLinkedHashMap.Builder<MD5Digest, String>()
+                .maximumWeightedCapacity(MAX_CACHE_PREPARED_MEMORY)
+                .build();
+        preparedStatement = new ConcurrentLinkedHashMap.Builder<CQLStatement, MD5Digest>()
+                .maximumWeightedCapacity(MAX_CACHE_PREPARED_MEMORY)
+                .build();
         initVar();
         initESClient();
     }
@@ -54,19 +64,27 @@ public class AuditQueryHandler implements QueryHandler {
         ClientState cs = queryState.getClientState();
         InetAddress clientAddress = queryState.getClientAddress();
         AuthenticatedUser user = cs.getUser();
-        saveLogToElasticsearch(user.getName(), clientAddress.getHostAddress(), query);
+        saveLogToElasticsearch(user.getName(), clientAddress.getHostAddress(), query, QUERY_TYPE.QUERY, null);
         LOGGER.trace("AuditLog: {} at {} executed query {}", user.getName(), clientAddress.getHostAddress(), query);
         return realQueryHandler.process(query, queryState, queryOptions, customPayload);
     }
 
     @Override
     public ResultMessage.Prepared prepare(String query, QueryState queryState, Map<String, ByteBuffer> customPayload) throws RequestValidationException {
-        return realQueryHandler.prepare(query, queryState, customPayload);
+        ResultMessage.Prepared prepQuery = realQueryHandler.prepare(query, queryState, customPayload);
+        if (null != prepQuery && null != query) {
+            preparedResult.putIfAbsent(prepQuery.statementId, query);
+        }
+        return prepQuery;
     }
 
     @Override
     public ParsedStatement.Prepared getPrepared(MD5Digest md5Digest) {
-        return realQueryHandler.getPrepared(md5Digest);
+        ParsedStatement.Prepared prepStat = realQueryHandler.getPrepared(md5Digest);
+        if (null != prepStat && null != md5Digest) {
+            preparedStatement.putIfAbsent(prepStat.statement, md5Digest);
+        }
+        return prepStat;
     }
 
     @Override
@@ -79,8 +97,12 @@ public class AuditQueryHandler implements QueryHandler {
         ClientState cs = queryState.getClientState();
         InetAddress clientAddress = queryState.getClientAddress();
         AuthenticatedUser user = cs.getUser();
-        saveLogToElasticsearch(user.getName(), clientAddress.getHostAddress(), cqlStatement.toString());
-        LOGGER.trace("AuditLog: {} at {} executed query {}", user.getName(), clientAddress.getHostAddress(), cqlStatement.toString());
+        String query = "";
+        if (null != cqlStatement) {
+            query = preparedResult.get(preparedStatement.get(cqlStatement));
+        }
+        saveLogToElasticsearch(user.getName(), clientAddress.getHostAddress(), query, QUERY_TYPE.PREPARED_STATEMENT, null);
+        LOGGER.trace("AuditLog processPrepared: {} at {} executed query {}", user.getName(), clientAddress.getHostAddress(), query);
         return realQueryHandler.processPrepared(cqlStatement, queryState, queryOptions, customPayload);
     }
 
@@ -89,8 +111,16 @@ public class AuditQueryHandler implements QueryHandler {
         ClientState cs = queryState.getClientState();
         InetAddress clientAddress = queryState.getClientAddress();
         AuthenticatedUser user = cs.getUser();
-        saveLogToElasticsearch(user.getName(), clientAddress.getHostAddress(), batchStatement.toString());
-        LOGGER.trace("AuditLog: {} at {} executed query {}", user.getName(), clientAddress.getHostAddress(), batchStatement.toString());
+        if (null != batchStatement.getStatements()) {
+            UUID batchID = UUID.randomUUID();
+            Set<ModificationStatement> querySet = new HashSet<ModificationStatement>(batchStatement.getStatements()); //If the batch request contains the same statement just log it one time
+            Iterator<ModificationStatement> queryIter = querySet.iterator();
+            while (queryIter.hasNext()) {
+                String logQuery = preparedResult.get(preparedStatement.get(queryIter.next()));
+                saveLogToElasticsearch(user.getName(), clientAddress.getHostAddress(), logQuery, QUERY_TYPE.BATCH, batchID);
+                LOGGER.trace("AuditLog processBatch: {} at {} executed query {}", user.getName(), clientAddress.getHostAddress(), logQuery);
+            }
+        }
         return realQueryHandler.processBatch(batchStatement, queryState, batchQueryOptions, customPayload);
     }
 
@@ -136,12 +166,14 @@ public class AuditQueryHandler implements QueryHandler {
                 .setMaxRetryTimeoutMillis(60000).build();
     }
 
-    private void saveLogToElasticsearch(String user, String clientAddress, String query) {
+    private void saveLogToElasticsearch(String user, String clientAddress, String query, QUERY_TYPE type, UUID batchID) {
 
         JSONObject payload = new JSONObject();
         payload.put("timestamp", DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mmX").withZone(ZoneOffset.UTC).format(Instant.now()));
         payload.put("user", user);
         payload.put("client_address", clientAddress);
+        payload.put("query_type", type.toString());
+        payload.put("batch_id", String.valueOf(batchID));
         payload.put("query", query);
 
         HttpEntity entity = new NStringEntity(payload.toString(), ContentType.APPLICATION_JSON);
@@ -153,9 +185,13 @@ public class AuditQueryHandler implements QueryHandler {
 
             @Override
             public void onFailure(Exception exception) {
-                LOGGER.info("Failed to index query {}", exception.getStackTrace());
+                LOGGER.error("Failed to index query {}", exception.getStackTrace());
             }
         };
         restClient.performRequestAsync("POST", "/" + esIndexName + "/log/", Collections.<String, String>emptyMap(), entity, responseListener);
+    }
+
+    private enum QUERY_TYPE {
+        QUERY, BATCH, PREPARED_STATEMENT
     }
 }
