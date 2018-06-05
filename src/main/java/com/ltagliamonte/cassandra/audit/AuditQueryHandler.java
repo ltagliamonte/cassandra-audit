@@ -45,6 +45,7 @@ public class AuditQueryHandler implements QueryHandler {
     private static String esHost = "127.0.0.1";
     private static Integer esPort = 443;
     private static String esSchema = "https";
+    private static boolean esDailyIndex = false;
     private static RestClient restClient;
 
     public AuditQueryHandler() {
@@ -151,6 +152,12 @@ public class AuditQueryHandler implements QueryHandler {
             } else {
                 LOGGER.debug("No value found for CASSANDRA_AUDIT_ES_SCHEMA using default {}", esSchema);
             }
+            if (environment.containsKey("CASSANDRA_AUDIT_DAILY_INDEX")) {
+                esDailyIndex = Boolean.valueOf(environment.get("CASSANDRA_AUDIT_DAILY_INDEX"));
+                LOGGER.debug("Using {} as per CASSANDRA_AUDIT_DAILY_INDEX", String.valueOf(esDailyIndex));
+            } else {
+                LOGGER.debug("No value found for CASSANDRA_AUDIT_DAILY_INDEX using default {}", String.valueOf(esDailyIndex));
+            }
         }
     }
 
@@ -167,7 +174,6 @@ public class AuditQueryHandler implements QueryHandler {
     }
 
     private void saveLogToElasticsearch(String user, String clientAddress, String query, QUERY_TYPE type, UUID batchID) {
-
         JSONObject payload = new JSONObject();
         payload.put("timestamp", DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mmX").withZone(ZoneOffset.UTC).format(Instant.now()));
         payload.put("user", user);
@@ -188,7 +194,11 @@ public class AuditQueryHandler implements QueryHandler {
                 LOGGER.error("Failed to index query {}", exception.getStackTrace());
             }
         };
-        restClient.performRequestAsync("POST", "/" + esIndexName + "/log/", Collections.<String, String>emptyMap(), entity, responseListener);
+        String indexName = esIndexName;
+        if (esDailyIndex) {
+            indexName = esIndexName + "-" + DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC).format(Instant.now());
+        }
+        restClient.performRequestAsync("POST", "/" + indexName + "/log/", Collections.<String, String>emptyMap(), entity, responseListener);
     }
 
     private enum QUERY_TYPE {

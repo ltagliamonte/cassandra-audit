@@ -18,5 +18,6 @@ Update the pom dependency and adapt the code if you need it for newer Casssandra
 Using Environment Variables it is possible to customise the following parameters:
 - CASSANDRA_AUDIT_INDEX_NAME	(default: cassandra_audit)
 - CASSANDRA_AUDIT_ES_ADDRESS	(default: 127.0.0.1)
-- CASSANDRA_AUDIT_ES_PORT		(default: 443)
-- CASSANDRA_AUDIT_ES_SCHEMA		(default: https)
+- CASSANDRA_AUDIT_ES_PORT	(default: 443)
+- CASSANDRA_AUDIT_ES_SCHEMA	(default: https)
+- CASSANDRA_AUDIT_DAILY_INDEX	(default: false)
